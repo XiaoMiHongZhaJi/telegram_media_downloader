@@ -122,7 +122,7 @@ async def _get_media_meta(
             _type,
             "{}_{}.{}".format(
                 _type,
-                media_obj.date.isoformat(),  # type: ignore
+                media_obj.date.isoformat().replace(":", "-"),  # type: ignore
                 file_format,
             ),
         )
@@ -172,6 +172,10 @@ async def download_media(
     """
     for retry in range(3):
         try:
+            if message.empty:
+                logger.info("消息[%s]可能已被删除", message.id)
+                DOWNLOADED_IDS.append(message.id)
+                return message.id
             if message.media is None:
                 return message.id
             for _type in media_types:
@@ -224,6 +228,16 @@ async def download_media(
                     message.id,
                 )
                 FAILED_IDS.append(message.id)
+        except OSError as e:
+            # OSError: [WinError 17]系统无法将文件移到不同的磁盘驱动器
+            logger.error(
+                "Message[%d]: could not be downloaded due to following exception:\n[%s].",
+                message.id,
+                e,
+                exc_info=True,
+            )
+            DOWNLOADED_IDS.append(message.id)
+            break
         except Exception as e:
             # pylint: disable = C0301
             logger.error(
@@ -311,7 +325,7 @@ async def begin_import(config: dict, pagination_limit: int) -> dict:
     await client.start()
     last_read_message_id: int = config["last_read_message_id"]
     messages_iter = client.get_chat_history(
-        config["chat_id"], offset_id=last_read_message_id, reverse=True
+        config["chat_id"], offset_id=last_read_message_id + 1, reverse=True
     )
     messages_list: list = []
     pagination_count: int = 0
@@ -368,7 +382,7 @@ def main():
             len(set(FAILED_IDS)),
         )
     update_config(updated_config)
-    check_for_updates()
+    # check_for_updates()
 
 
 if __name__ == "__main__":
