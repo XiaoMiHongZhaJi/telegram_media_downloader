@@ -176,6 +176,39 @@ async def download_media(
                 logger.info("消息[%s]可能已被删除", message.id)
                 DOWNLOADED_IDS.append(message.id)
                 return message.id
+            # 写入文件
+            if message.from_user is not None:
+                content = "[" + str(message.id) + "] "
+                date = str(message.date).split(" ")
+                content += "[" + date[1] + "] "
+                username = ""
+                if message.from_user.first_name is not None:
+                    username += message.from_user.first_name.replace("\t", "").replace("ㅤ", "").replace(" ", "")
+                if message.from_user.last_name is not None:
+                    username += " " + message.from_user.last_name.replace("\t", "").replace("ㅤ", "").replace(" ", "")
+                if len(username) > 12:
+                    username = username[:12]
+                content += "%-12s" % (username + "：")
+                content += "\t"
+                if message.text is not None:
+                    if message.text.find("\n") > -1:
+                        content += "↓\n\n"
+                    content += message.text
+                elif message.caption is not None:
+                    if message.caption.find("\n") > -1:
+                        content += "↓\n\n"
+                    content += message.caption
+                elif message.sticker is not None:
+                    if message.sticker.emoji is not None:
+                        content += "[sticker]" + message.sticker.emoji
+                else:
+                    content += message.link
+                if message.reply_to_message_id is not None:
+                    content += "\t[Reply：" + str(message.reply_to_message_id) + "]"
+                content += "\n"
+                filename = "./message/" + date[0] + ".txt"
+                with open(filename, 'a', encoding='utf-8') as file:
+                    file.write(content)
             if message.media is None:
                 return message.id
             for _type in media_types:
@@ -285,6 +318,9 @@ async def process_messages(
     int
         Max value of list of message ids.
     """
+    path = r'./message'
+    if not os.path.exists(path):
+        os.mkdir("./message")
     message_ids = await asyncio.gather(
         *[
             download_media(client, message, media_types, file_formats)
