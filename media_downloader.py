@@ -127,8 +127,8 @@ async def _get_media_meta(
             ),
         )
     else:
-        file_name = getattr(media_obj, "file_name", "no_name")
-        if file_name.find(".") == -1 and file_format is not None:
+        file_name = getattr(media_obj, "file_name", None) or ""
+        if len(file_name) > 0 and file_name.find(".") == -1 and file_format is not None:
             file_name += "." + file_format
         file_name = os.path.join(
             THIS_DIR, _type, file_name
