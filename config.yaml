@@ -10,6 +10,7 @@ media_types:
 - document
 - voice
 - video_note
+- animation
 file_formats:
   audio:
   - all

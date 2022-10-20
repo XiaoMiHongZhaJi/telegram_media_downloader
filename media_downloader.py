@@ -114,7 +114,7 @@ async def _get_media_meta(
     else:
         file_format = None
 
-    if _type in ["voice", "video_note"]:
+    if _type in ["voice", "video_note", "animation"]:
         # pylint: disable = C0209
         file_format = media_obj.mime_type.split("/")[-1]  # type: ignore
         file_name: str = os.path.join(
@@ -127,8 +127,11 @@ async def _get_media_meta(
             ),
         )
     else:
+        file_name = getattr(media_obj, "file_name", "no_name")
+        if file_name.find(".") == -1 and file_format is not None:
+            file_name += "." + file_format
         file_name = os.path.join(
-            THIS_DIR, _type, getattr(media_obj, "file_name", None) or ""
+            THIS_DIR, _type, file_name
         )
     return file_name, file_format
 
