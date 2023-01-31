@@ -11,6 +11,11 @@ media_types:
 - voice
 - video_note
 - animation
+datasource:
+  database: tg_message
+  host: localhost
+  password: root
+  user: root
 file_formats:
   audio:
   - all
@@ -18,3 +23,13 @@ file_formats:
   - all
   video:
   - all
+max_file_size_mb: 4
+notice_url: http://xxxx/xxxx/
+proxy:
+  hostname: 192.168.100.10
+  port: 7890
+  scheme: http
+push_keywords:
+- 红包
+push_users:
+- username1

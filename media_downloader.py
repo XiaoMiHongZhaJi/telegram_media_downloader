@@ -2,8 +2,10 @@
 import asyncio
 import logging
 import os
+import re
 from typing import List, Optional, Tuple, Union
 
+import pymysql
 import pyrogram
 import yaml
 from pyrogram.types import Audio, Document, Photo, Video, VideoNote, Voice
@@ -12,81 +14,45 @@ from rich.logging import RichHandler
 from utils.file_management import get_next_name, manage_duplicate_file
 from utils.log import LogFilter
 from utils.meta import print_meta
-from utils.updates import check_for_updates
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="[%X]",
-    handlers=[RichHandler()],
-)
+logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
 logging.getLogger("pyrogram.session.session").addFilter(LogFilter())
 logging.getLogger("pyrogram.client").addFilter(LogFilter())
 logger = logging.getLogger("media_downloader")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-FAILED_IDS: list = []
-DOWNLOADED_IDS: list = []
+last_message_id = 0
+with open("config.yaml", encoding='utf-8') as f:
+    config = yaml.safe_load(f)
+media_types = config["media_types"]
+max_file_size_mb = config["max_file_size_mb"]
+file_formats = config["file_formats"]
+datasource = config["datasource"]
+if datasource is not None:
+    try:
+        db = pymysql.connect(user=datasource["user"], password=datasource["password"], host=datasource["host"],
+                             database=datasource["database"], connect_timeout=2)
+        logger.info("数据库连接成功")
+    except Exception:
+        datasource = None
+        logger.error("数据库连接失败")
 
 
-def update_config(config: dict):
-    """
-    Update existing configuration file.
-
-    Parameters
-    ----------
-    config: dict
-        Configuration to be written into config file.
-    """
-    config["ids_to_retry"] = (
-        list(set(config["ids_to_retry"]) - set(DOWNLOADED_IDS)) + FAILED_IDS
-    )
-    with open("config.yaml", "w") as yaml_file:
-        yaml.dump(config, yaml_file, default_flow_style=False)
+def update_config():
+    with open("config.yaml", "w", encoding='utf-8') as yaml_file:
+        yaml.dump(config, yaml_file, default_flow_style=False, allow_unicode=True)
     logger.info("Updated last read message_id to config file")
 
 
 def _can_download(_type: str, file_formats: dict, file_format: Optional[str]) -> bool:
-    """
-    Check if the given file format can be downloaded.
-
-    Parameters
-    ----------
-    _type: str
-        Type of media object.
-    file_formats: dict
-        Dictionary containing the list of file_formats
-        to be downloaded for `audio`, `document` & `video`
-        media types
-    file_format: str
-        Format of the current file to be downloaded.
-
-    Returns
-    -------
-    bool
-        True if the file format can be downloaded else False.
-    """
     if _type in ["audio", "document", "video"]:
         allowed_formats: list = file_formats[_type]
-        if not file_format in allowed_formats and allowed_formats[0] != "all":
+        if file_format not in allowed_formats and allowed_formats[0] != "all":
             return False
     return True
 
 
 def _is_exist(file_path: str) -> bool:
-    """
-    Check if a file exists and it is not a directory.
-
-    Parameters
-    ----------
-    file_path: str
-        Absolute path of the file to be checked.
-
-    Returns
-    -------
-    bool
-        True if the file exists else False.
-    """
     return not os.path.isdir(file_path) and os.path.exists(file_path)
 
 
@@ -94,334 +60,281 @@ async def _get_media_meta(
     media_obj: Union[Audio, Document, Photo, Video, VideoNote, Voice],
     _type: str,
 ) -> Tuple[str, Optional[str]]:
-    """Extract file name and file id from media object.
-
-    Parameters
-    ----------
-    media_obj: Union[Audio, Document, Photo, Video, VideoNote, Voice]
-        Media object to be extracted.
-    _type: str
-        Type of media object.
-
-    Returns
-    -------
-    Tuple[str, Optional[str]]
-        file_name, file_format
-    """
     if _type in ["audio", "document", "video"]:
-        # pylint: disable = C0301
         file_format: Optional[str] = media_obj.mime_type.split("/")[-1]  # type: ignore
     else:
         file_format = None
 
     if _type in ["voice", "video_note", "animation"]:
-        # pylint: disable = C0209
         file_format = media_obj.mime_type.split("/")[-1]  # type: ignore
-        file_name: str = os.path.join(
-            THIS_DIR,
-            _type,
-            "{}_{}.{}".format(
-                _type,
-                media_obj.date.isoformat().replace(":", "-"),  # type: ignore
-                file_format,
-            ),
-        )
+        file_name: str = os.path.join(THIS_DIR, _type,
+            "{}_{}.{}".format(_type, media_obj.date.isoformat().replace(":", "-"), file_format))
     else:
         file_name = getattr(media_obj, "file_name", None) or ""
         if len(file_name) > 0 and file_name.find(".") == -1 and file_format is not None:
             file_name += "." + file_format
-        file_name = os.path.join(
-            THIS_DIR, _type, file_name
-        )
+        file_name = os.path.join(THIS_DIR, _type, file_name)
     return file_name, file_format
 
 
-async def download_media(
-    client: pyrogram.client.Client,
-    message: pyrogram.types.Message,
-    media_types: List[str],
-    file_formats: dict,
-):
-    """
-    Download media from Telegram.
+async def write_file(chat_title, caption, message, message_id, reply_to, send_time, show_name, sticker, text, status):
+    content = "[" + str(message_id) + "] [" + send_time.split(" ")[1] + "] "
+    content += "%-12s" % (show_name + "：") + "\t"
+    if message.media is not None:
+        content += "[media]"
+    if text is not None:
+        if text.find("\n") > -1:
+            content += "↓\n"
+        content += text
+    elif caption is not None:
+        if caption.find("\n") > -1:
+            content += "↓\n"
+        content += caption
+    elif sticker is not None:
+        if sticker.emoji is not None:
+            content += "[sticker]" + sticker.emoji
+    else:
+        content += message.link
+    if reply_to is not None:
+        content += "\t[Reply：" + reply_to + "]"
+    content += "\n"
+    if status == '1':
+        content = "[已补充]" + content
+        logger.warning(content)
+    elif status == '2':
+        content = "[已编辑]" + content
+        logger.warning(content)
+    elif status == '4':
+        content = "[已删除]" + content
+        logger.warning(content)
+    # title = re.sub(r"[\\\"\sㅤ/:?!*.<>|]", "_", chat_title)
+    message_dir = "./message/"
+    filename = message_dir + send_time.split(" ")[0] + ".txt"
+    if not os.path.exists(message_dir):
+        os.makedirs(message_dir)
+    with open(filename, 'a', encoding='utf-8') as file:
+        file.write(content)
 
-    Each of the files to download are retried 3 times with a
-    delay of 5 seconds each.
 
-    Parameters
-    ----------
-    client: pyrogram.client.Client
-        Client to interact with Telegram APIs.
-    message: pyrogram.types.Message
-        Message object retrieved from telegram.
-    media_types: list
-        List of strings of media types to be downloaded.
-        Ex : `["audio", "photo"]`
-        Supported formats:
-            * audio
-            * document
-            * photo
-            * video
-            * voice
-    file_formats: dict
-        Dictionary containing the list of file_formats
-        to be downloaded for `audio`, `document` & `video`
-        media types.
+def query_msg(chat_id, message_id):
+    sql = "select text,caption,message_id from group_message where chat_id = " + str(chat_id) + " and message_id = " + str(message_id) + " order by id desc"
+    try:
+        cursor = db.cursor()
+        cursor.execute(sql)
+        result = cursor.fetchone()
+        if result is None:
+            return None, None, None
+        text = result[0]
+        caption = result[1]
+        message_id = result[2]
+        return text, caption, message_id
+    except Exception as e:
+        logger.error("sql执行出错：" + sql)
+        logger.error(e)
+    pass
 
-    Returns
-    -------
-    int
-        Current message id.
-    """
-    for retry in range(3):
-        try:
-            if message.empty:
-                logger.info("消息[%s]可能已被删除", message.id)
-                DOWNLOADED_IDS.append(message.id)
-                return message.id
-            # 写入文件
-            if message.from_user is not None:
-                content = "[" + str(message.id) + "] "
-                date = str(message.date).split(" ")
-                content += "[" + date[1] + "] "
-                username = ""
-                if message.from_user.first_name is not None:
-                    username += message.from_user.first_name.replace("\t", "").replace("ㅤ", "").replace(" ", "")
-                if message.from_user.last_name is not None:
-                    username += " " + message.from_user.last_name.replace("\t", "").replace("ㅤ", "").replace(" ", "")
-                if len(username) > 12:
-                    username = username[:12]
-                content += "%-12s" % (username + "：")
-                content += "\t"
-                if message.text is not None:
-                    if message.text.find("\n") > -1:
-                        content += "↓\n\n"
-                    content += message.text
-                elif message.caption is not None:
-                    if message.caption.find("\n") > -1:
-                        content += "↓\n\n"
-                    content += message.caption
-                elif message.sticker is not None:
-                    if message.sticker.emoji is not None:
-                        content += "[sticker]" + message.sticker.emoji
+
+def update_status(message_id, last_message_id, status):
+    sql = "update group_message set status = " + status + " where message_id > " + str(last_message_id) + " and message_id < " + str(message_id)
+    try:
+        cursor = db.cursor()
+        cursor.execute(sql)
+        db.commit()
+    except Exception as e:
+        logger.error("sql执行出错：" + sql)
+        logger.error(e)
+    pass
+
+
+async def insert_db(caption, chat_id, chat_title, first_name, forward_from, last_name, message_id, phone_number,
+                    reply_to, send_time, edit_date, sticker, text, user_id, username, status):
+    sql = "INSERT INTO group_message(chat_id,message_id,user_id,chat_title,first_name,last_name,username,phone_number,text,forward_from,reply_to,caption,sticker,send_time,edit_date,status) VALUES ("
+    sql += str(chat_id) + ","
+    sql += str(message_id) + ","
+    sql += user_id + ",'"
+    sql += chat_title + "',"
+    sql += "null," if first_name is None else "'" + first_name + "',"
+    sql += "null," if last_name is None else "'" + last_name + "',"
+    sql += "null," if username is None else "'" + username + "',"
+    sql += "null," if phone_number is None else "'" + phone_number + "',"
+    sql += "null," if text is None else "'" + text[:2000] + "',"
+    sql += "null," if forward_from is None else "'" + forward_from + "',"
+    sql += "null," if reply_to is None else "'" + reply_to + "',"
+    sql += "null," if caption is None else "'" + caption[:2000] + "',"
+    sql += "null,'" if sticker is None or sticker.emoji is None else "'" + sticker.emoji + "','"
+    sql += send_time + "',"
+    sql += "null," if edit_date is None else "'" + edit_date + "',"
+    sql += status + ")"
+    try:
+        cursor = db.cursor()
+        cursor.execute(sql)
+        db.commit()
+    except Exception as e:
+        logger.error("sql执行出错：" + sql)
+        logger.error(e)
+
+
+def get_show_name(user):
+    if user is None:
+        return None
+    first_name = user.first_name
+    last_name = user.last_name
+    username = user.username
+    show_name = ""
+    if first_name is not None:
+        show_name += re.sub(r"[\\\"\sㅤ/:?!*.<>|]", "", first_name)
+    if last_name is not None:
+        show_name += re.sub(r"[\\\"\sㅤ/:?!*.<>|]", "", last_name)
+    length = len(show_name)
+    if length == 0:
+        show_name = "已注销 " + str(user.id) if username is None else username
+    elif length > 12:
+        show_name = show_name[:12]
+    return show_name
+
+
+def get_simple_text(message):
+    if message is None:
+        return None
+    text = message.text
+    if text is not None:
+        return text.replace("'", "")
+    caption = message.caption
+    if caption is not None:
+        return caption.replace("'", "")
+    if message.sticker is not None and message.sticker.emoji is not None:
+        return message.sticker.emoji
+    if message.media is not None:
+        return "[media]" + str(message.id)
+    return str(message.id)
+
+
+async def download_message(app: pyrogram.client.Client,message: pyrogram.types.Message):
+    message_id = message.id
+    try:
+        if message.empty:
+            return message_id
+        chat = message.chat
+        chat_id = chat.id
+        from_user = message.from_user
+        if chat_id is None or from_user is None:
+            # logger.info(message)
+            return message_id
+        chat_title = chat.title
+        text = None if message.text is None else message.text.replace("'", "").replace("\\", "")
+        send_time = str(message.date)
+        edit_date = None if message.edit_date is None else str(message.edit_date)
+        caption = None if message.caption is None else message.caption.replace("'", "").replace("\\", "")
+        sticker = message.sticker
+        forward_from = get_show_name(message.forward_from)
+        reply_to = get_simple_text(message.reply_to_message)
+        if reply_to is not None and len(reply_to) > 20:
+            reply_to = reply_to[:20] + "..."
+        first_name = from_user.first_name
+        last_name = from_user.last_name
+        username = from_user.username
+        user_id = str(from_user.id)
+        phone_number = from_user.phone_number
+        show_name = get_show_name(from_user)
+        status = '0' # 消息状态 0：默认，1：补充，2：已被修改，4：已被删除
+        if datasource is not None:
+            exist_text, exist_caption, exist_message_id = query_msg(chat_id, message_id)
+            if exist_message_id is None:
+                status = '1'
+            else:
+                global last_message_id
+                if last_message_id > 0 and message_id > last_message_id + 1:
+                    update_status(message_id, last_message_id, '4')
+                    while last_message_id > 0 and message_id > last_message_id + 1:
+                        logger.warning("[已删除][" + str(last_message_id + 1) + "]")
+                        last_message_id += 1
+                last_message_id = message_id
+                if exist_text == text and exist_caption == caption:
+                    return message_id
                 else:
-                    content += message.link
-                if message.reply_to_message_id is not None:
-                    content += "\t[Reply：" + str(message.reply_to_message_id) + "]"
-                content += "\n"
-                filename = "./message/" + date[0] + ".txt"
-                with open(filename, 'a', encoding='utf-8') as file:
-                    file.write(content)
-            if message.media is None:
-                return message.id
-            for _type in media_types:
-                _media = getattr(message, _type, None)
-                if _media is None:
-                    continue
-                file_name, file_format = await _get_media_meta(_media, _type)
-                if _can_download(_type, file_formats, file_format):
-                    if _is_exist(file_name):
-                        file_name = get_next_name(file_name)
-                        download_path = await client.download_media(
-                            message, file_name=file_name
-                        )
-                        # pylint: disable = C0301
-                        download_path = manage_duplicate_file(download_path)  # type: ignore
-                    else:
-                        download_path = await client.download_media(
-                            message, file_name=file_name
-                        )
-                    if download_path:
-                        logger.info("Media downloaded - %s", download_path)
-                    DOWNLOADED_IDS.append(message.id)
-            break
-        except pyrogram.errors.exceptions.bad_request_400.BadRequest:
-            logger.warning(
-                "Message[%d]: file reference expired, refetching...",
-                message.id,
-            )
-            message = await client.get_messages(  # type: ignore
-                chat_id=message.chat.id,  # type: ignore
-                message_ids=message.id,
-            )
-            if retry == 2:
-                # pylint: disable = C0301
-                logger.error(
-                    "Message[%d]: file reference expired for 3 retries, download skipped.",
-                    message.id,
-                )
-                FAILED_IDS.append(message.id)
-        except TypeError:
-            # pylint: disable = C0301
-            logger.warning(
-                "Timeout Error occurred when downloading Message[%d], retrying after 5 seconds",
-                message.id,
-            )
-            await asyncio.sleep(5)
-            if retry == 2:
-                logger.error(
-                    "Message[%d]: Timing out after 3 reties, download skipped.",
-                    message.id,
-                )
-                FAILED_IDS.append(message.id)
-        except OSError as e:
-            # OSError: [WinError 17]系统无法将文件移到不同的磁盘驱动器
-            logger.error(
-                "Message[%d]: could not be downloaded due to following exception:\n[%s].",
-                message.id,
-                e,
-                exc_info=True,
-            )
-            DOWNLOADED_IDS.append(message.id)
-            break
-        except Exception as e:
-            # pylint: disable = C0301
-            logger.error(
-                "Message[%d]: could not be downloaded due to following exception:\n[%s].",
-                message.id,
-                e,
-                exc_info=True,
-            )
-            FAILED_IDS.append(message.id)
-            break
-    return message.id
+                    status = '2'
+            # 记录到数据库
+            await insert_db(caption, chat_id, chat_title, first_name, forward_from, last_name, message_id, phone_number,
+                            reply_to, send_time, edit_date, sticker, text, user_id, username, status)
+        # 记录到txt
+        await write_file(chat_title, caption, message, message_id, reply_to, send_time, show_name, sticker, text, status)
+        # 下载附件
+        if message.media is not None:
+            await down_media(app, message)
+    except pyrogram.errors.exceptions.bad_request_400.BadRequest as e:
+        logger.error("Message[%d]: file reference expired, refetching...", message_id, e, exc_info=True)
+    except TypeError as e:
+        logger.error("Timeout Error occurred when downloading Message[%d]", message_id, e, exc_info=True)
+    except Exception as e:
+        logger.error("Message[%d]: could not be downloaded due to following exception:\n[%s].", message_id, e, exc_info=True)
+    return message_id
 
 
-async def process_messages(
-    client: pyrogram.client.Client,
-    messages: List[pyrogram.types.Message],
-    media_types: List[str],
-    file_formats: dict,
-) -> int:
-    """
-    Download media from Telegram.
-
-    Parameters
-    ----------
-    client: pyrogram.client.Client
-        Client to interact with Telegram APIs.
-    messages: list
-        List of telegram messages.
-    media_types: list
-        List of strings of media types to be downloaded.
-        Ex : `["audio", "photo"]`
-        Supported formats:
-            * audio
-            * document
-            * photo
-            * video
-            * voice
-    file_formats: dict
-        Dictionary containing the list of file_formats
-        to be downloaded for `audio`, `document` & `video`
-        media types.
-
-    Returns
-    -------
-    int
-        Max value of list of message ids.
-    """
+async def process_messages(client: pyrogram.client.Client, messages: List[pyrogram.types.Message]) -> int:
     path = r'./message'
     if not os.path.exists(path):
         os.mkdir("./message")
-    message_ids = await asyncio.gather(
-        *[
-            download_media(client, message, media_types, file_formats)
-            for message in messages
-        ]
-    )
-
-    last_message_id: int = max(message_ids)
-    return last_message_id
+    message_ids = await asyncio.gather(*[download_message(client, message) for message in messages])
+    last_read_message_id: int = max(message_ids)
+    return last_read_message_id
 
 
-async def begin_import(config: dict, pagination_limit: int) -> dict:
-    """
-    Create pyrogram client and initiate download.
+async def down_media(app, message):
+    if media_types is None or len(media_types) == 0:
+        return
+    for _type in media_types:
+        _media = getattr(message, _type, None)
+        if _media is None:
+            continue
+        file_name, file_format = await _get_media_meta(_media, _type)
+        if max_file_size_mb is not None and max_file_size_mb > 0:
+            file_size = _media.file_size
+            if file_size > max_file_size_mb * 1024 * 1024:
+                logger.warning(file_name.split("\\")[-1] + " 文件大小：" + str(round(file_size / 1024 / 1024, 1)) + "MB，超出限制，跳过下载")
+                return
+        if _can_download(_type, file_formats, file_format):
+            if _is_exist(file_name):
+                file_name = get_next_name(file_name)
+                download_path = await app.download_media(message, file_name=file_name)
+                download_path = manage_duplicate_file(download_path)
+            else:
+                download_path = await app.download_media(message, file_name=file_name)
+            if download_path:
+                logger.info("Media downloaded - %s", download_path)
 
-    The pyrogram client is created using the ``api_id``, ``api_hash``
-    from the config and iter through message offset on the
-    ``last_message_id`` and the requested file_formats.
 
-    Parameters
-    ----------
-    config: dict
-        Dict containing the config to create pyrogram client.
-    pagination_limit: int
-        Number of message to download asynchronously as a batch.
-
-    Returns
-    -------
-    dict
-        Updated configuration to be written into config file.
-    """
-    client = pyrogram.Client(
-        "media_downloader",
-        api_id=config["api_id"],
-        api_hash=config["api_hash"],
-        proxy=config.get("proxy"),
-    )
-    await client.start()
+async def begin_import(pagination_limit: int) -> dict:
+    app = pyrogram.Client("media_downloader", api_id=config["api_id"], api_hash=config["api_hash"], proxy=config.get("proxy"))
+    await app.start()
     last_read_message_id: int = config["last_read_message_id"]
-    messages_iter = client.get_chat_history(
-        config["chat_id"], offset_id=last_read_message_id + 1, reverse=True
-    )
+    messages_iter = app.get_chat_history(config["chat_id"])
     messages_list: list = []
+    lastest_message_id = 0
     pagination_count: int = 0
-    if config["ids_to_retry"]:
-        logger.info("Downloading files failed during last run...")
-        skipped_messages: list = await client.get_messages(  # type: ignore
-            chat_id=config["chat_id"], message_ids=config["ids_to_retry"]
-        )
-        for message in skipped_messages:
-            pagination_count += 1
-            messages_list.append(message)
-
-    async for message in messages_iter:  # type: ignore
-        if pagination_count != pagination_limit:
-            pagination_count += 1
-            messages_list.append(message)
-        else:
-            last_read_message_id = await process_messages(
-                client,
-                messages_list,
-                config["media_types"],
-                config["file_formats"],
-            )
+    async for message in messages_iter:
+        message_id = message.id
+        if lastest_message_id < message_id:
+            lastest_message_id = message_id
+        messages_list.insert(0, message)
+        pagination_count += 1
+        if message_id <= last_read_message_id + 1:
+            await process_messages(app, messages_list)
+            config["last_read_message_id"] = lastest_message_id
+            update_config()
+            await app.stop()
+            return config
+        elif pagination_count >= pagination_limit:
+            await process_messages(app, messages_list)
             pagination_count = 0
-            messages_list = []
-            messages_list.append(message)
-            config["last_read_message_id"] = last_read_message_id
-            update_config(config)
-    if messages_list:
-        last_read_message_id = await process_messages(
-            client,
-            messages_list,
-            config["media_types"],
-            config["file_formats"],
-        )
+            messages_list.clear()
 
-    await client.stop()
-    config["last_read_message_id"] = last_read_message_id
+    await app.stop()
     return config
 
 
 def main():
-    """Main function of the downloader."""
-    with open(os.path.join(THIS_DIR, "config.yaml")) as f:
-        config = yaml.safe_load(f)
-    updated_config = asyncio.get_event_loop().run_until_complete(
-        begin_import(config, pagination_limit=100)
-    )
-    if FAILED_IDS:
-        logger.info(
-            "Downloading of %d files failed. "
-            "Failed message ids are added to config file.\n"
-            "These files will be downloaded on the next run.",
-            len(set(FAILED_IDS)),
-        )
-    update_config(updated_config)
-    # check_for_updates()
+    asyncio.get_event_loop().run_until_complete(begin_import(pagination_limit=100))
+    update_config()
 
 
 if __name__ == "__main__":
