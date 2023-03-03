@@ -24,10 +24,10 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 last_message_id = 0
 with open("config.yaml", encoding='utf-8') as f:
     config = yaml.safe_load(f)
-media_types = config["media_types"]
-max_file_size_mb = config["max_file_size_mb"]
-file_formats = config["file_formats"]
-datasource = config["datasource"]
+media_types = config.get("media_types")
+max_file_size_mb = config.get("max_file_size_mb")
+file_formats = config.get("file_formats")
+datasource = config.get("datasource")
 if datasource is not None:
     try:
         db = pymysql.connect(user=datasource["user"], password=datasource["password"], host=datasource["host"],
@@ -45,6 +45,8 @@ def update_config():
 
 
 def _can_download(_type: str, file_formats: dict, file_format: Optional[str]) -> bool:
+    if file_formats is None:
+        return True
     if _type in ["audio", "document", "video"]:
         allowed_formats: list = file_formats[_type]
         if file_format not in allowed_formats and allowed_formats[0] != "all":
@@ -77,10 +79,10 @@ async def _get_media_meta(
     return file_name, file_format
 
 
-async def write_file(chat_title, caption, message, message_id, reply_to, send_time, show_name, sticker, text, status):
+async def write_file(caption, message, message_id, reply_to, send_time, show_name, sticker, text, status):
     content = "[" + str(message_id) + "] [" + send_time.split(" ")[1] + "] "
     content += "%-12s" % (show_name + "：") + "\t"
-    if message.media is not None:
+    if message.media is not None and status != '4':
         content += "[media]"
     if text is not None:
         if text.find("\n") > -1:
@@ -117,25 +119,26 @@ async def write_file(chat_title, caption, message, message_id, reply_to, send_ti
 
 
 def query_msg(chat_id, message_id):
-    sql = "select text,caption,message_id from group_message where chat_id = " + str(chat_id) + " and message_id = " + str(message_id) + " order by id desc"
+    sql = "select text,caption,message_id,concat(ifnull(first_name,''),ifnull(last_name,'')) first_name,ifnull(username,'') username from group_message where chat_id = " + str(chat_id) + " and message_id = " + str(message_id) + " order by id desc"
     try:
         cursor = db.cursor()
         cursor.execute(sql)
         result = cursor.fetchone()
         if result is None:
-            return None, None, None
-        text = result[0]
-        caption = result[1]
+            return None, None, None, ''
+        text = None if result[0] is None else result[0].replace("'", "").replace("\\", "")
+        caption = None if result[1] is None else result[1].replace("'", "").replace("\\", "")
         message_id = result[2]
-        return text, caption, message_id
+        first_name = result[3] if len(result[3]) > 0 else result[4]
+        return text, caption, message_id, first_name
     except Exception as e:
         logger.error("sql执行出错：" + sql)
         logger.error(e)
     pass
 
 
-def update_status(message_id, last_message_id, status):
-    sql = "update group_message set status = " + status + " where message_id > " + str(last_message_id) + " and message_id < " + str(message_id)
+def update_status(message_id, status):
+    sql = "update group_message set status = " + status + " where message_id = " + str(message_id)
     try:
         cursor = db.cursor()
         cursor.execute(sql)
@@ -238,26 +241,31 @@ async def download_message(app: pyrogram.client.Client,message: pyrogram.types.M
         show_name = get_show_name(from_user)
         status = '0' # 消息状态 0：默认，1：补充，2：已被修改，4：已被删除
         if datasource is not None:
-            exist_text, exist_caption, exist_message_id = query_msg(chat_id, message_id)
+            exist_text, exist_caption, exist_message_id, exist_first_name = query_msg(chat_id, message_id)
             if exist_message_id is None:
                 status = '1'
             else:
                 global last_message_id
-                if last_message_id > 0 and message_id > last_message_id + 1:
-                    update_status(message_id, last_message_id, '4')
-                    while last_message_id > 0 and message_id > last_message_id + 1:
-                        logger.warning("[已删除][" + str(last_message_id + 1) + "]")
-                        last_message_id += 1
+                while last_message_id > 0 and message_id < last_message_id - 1:
+                    # 有疑似被删除的消息
+                    last_message_id -= 1
+                    last_text, last_caption, last_id, last_first_name = query_msg(chat_id, last_message_id)
+                    if last_id is not None:
+                        update_status(last_id, '4')
+                        await write_file(last_caption, message, last_id, None, send_time, last_first_name, None, last_text, '4')
                 last_message_id = message_id
                 if exist_text == text and exist_caption == caption:
+                    # 消息已存在且未被修改
                     return message_id
                 else:
+                    # 消息已存在但被修改
                     status = '2'
+                    await write_file(exist_caption, message, message_id, reply_to, send_time, show_name, sticker, exist_text, status)
             # 记录到数据库
             await insert_db(caption, chat_id, chat_title, first_name, forward_from, last_name, message_id, phone_number,
                             reply_to, send_time, edit_date, sticker, text, user_id, username, status)
         # 记录到txt
-        await write_file(chat_title, caption, message, message_id, reply_to, send_time, show_name, sticker, text, status)
+        await write_file(caption, message, message_id, reply_to, send_time, show_name, sticker, text, status)
         # 下载附件
         if message.media is not None:
             await down_media(app, message)
@@ -306,7 +314,11 @@ async def down_media(app, message):
 async def begin_import(pagination_limit: int) -> dict:
     app = pyrogram.Client("media_downloader", api_id=config["api_id"], api_hash=config["api_hash"], proxy=config.get("proxy"))
     await app.start()
-    last_read_message_id: int = config["last_read_message_id"]
+    last_read_message_id: int = config.get("last_read_message_id")
+    if last_read_message_id is None:
+        last_read_message_id = 0
+    elif last_read_message_id > 500:
+        last_read_message_id -+ 500
     messages_iter = app.get_chat_history(config["chat_id"])
     messages_list: list = []
     lastest_message_id = 0
@@ -315,7 +327,7 @@ async def begin_import(pagination_limit: int) -> dict:
         message_id = message.id
         if lastest_message_id < message_id:
             lastest_message_id = message_id
-        messages_list.insert(0, message)
+        messages_list.append(message)
         pagination_count += 1
         if message_id <= last_read_message_id + 1:
             await process_messages(app, messages_list)
@@ -333,7 +345,7 @@ async def begin_import(pagination_limit: int) -> dict:
 
 
 def main():
-    asyncio.get_event_loop().run_until_complete(begin_import(pagination_limit=100))
+    asyncio.get_event_loop().run_until_complete(begin_import(pagination_limit=500))
     update_config()
 
 

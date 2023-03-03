@@ -13,10 +13,11 @@ logger = logging.getLogger("media_downloader_current")
 
 with open("config.yaml", encoding='utf-8') as f:
     config = yaml.safe_load(f)
-handle_chat_id = config["chat_id"]
-push_users = config["push_users"]
-push_keywords = config["push_keywords"]
-notice_url = config["notice_url"]
+handle_chat_id = config.get("chat_id")
+push_users = config.get("push_users")
+push_keywords = config.get("push_keywords")
+notice_url = config.get("notice_url")
+add_live_info_url = config.get("add_live_info_url")
 app = Client("media_downloader_current", api_id=config["api_id"], api_hash=config["api_hash"], proxy=config.get("proxy"))
 
 
@@ -42,6 +43,28 @@ def keywords_notice(chat_title, show_name, message_text):
                 }
                 requests.post(notice_url, data)
                 break
+
+
+def add_live_info(text):
+    # #YouTube #直播预告 https://www.youtube.com/watch?v=eIUxtCBCVUw
+    if add_live_info_url is None:
+        return
+    splits = text.split(" ")
+    flag = False
+    for split in splits:
+        if split.find("直播预告") > -1 or split.find("开播通知") > -1:
+            flag = True
+        if split.find("https") > -1:
+            url = split
+    if not flag or url is None:
+        return
+    data = {
+        "downLiveChat": True,
+        "getLiveInfo": True,
+        "url": url
+    }
+    res = requests.post(add_live_info_url, data)
+    logging.info(res.text)
 
 
 @app.on_message(filters.group)
@@ -80,7 +103,7 @@ async def handle_message(client, message):
         keywords_notice(chat_title, show_name, message_text)
 
     # 记录到txt
-    await write_file(chat_title, caption, message, message_id, reply_to, send_time, show_name, sticker, text, '0')
+    await write_file(caption, message, message_id, reply_to, send_time, show_name, sticker, text, '0')
 
     # 记录到数据库
     await insert_db(caption, chat_id, chat_title, first_name, forward_from, last_name, message_id, phone_number,
@@ -88,5 +111,8 @@ async def handle_message(client, message):
     # 下载附件
     if message.media is not None:
         await down_media(app, message)
+    # 67373工具人
+    if user_id == "1994661779" and text is not None:
+        await add_live_info(text)
 
 app.run()
