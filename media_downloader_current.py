@@ -50,18 +50,21 @@ def add_live_info(text):
     if add_live_info_url is None:
         return
     splits = text.split(" ")
-    flag = False
+    live_status = None
     for split in splits:
-        if split.find("直播预告") > -1 or split.find("开播通知") > -1:
-            flag = True
-        if split.find("https") > -1:
+        if split.find("直播预告") > -1:
+            live_status = '0'
+        elif split.find("开播通知") > -1:
+            live_status = '1'
+        elif split.find("https") > -1:
             url = split
-    if not flag or url is None:
+    if live_status is None or url is None:
         return
     data = {
-        "downLiveChat": True,
-        "getLiveInfo": True,
-        "url": url
+        "down_live_chat": True,
+        "get_live_info": True,
+        "url": url,
+        "liveStatus": live_status
     }
     res = requests.post(add_live_info_url, data)
     logging.info(res.text)
