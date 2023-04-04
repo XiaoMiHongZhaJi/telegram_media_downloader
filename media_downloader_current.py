@@ -4,14 +4,17 @@ import yaml
 import logging
 from pyrogram import filters, Client
 
-from media_downloader import down_media, get_show_name, get_simple_text, write_file, insert_db
+from media_downloader import down_media, get_show_name, get_simple_text, write_file, insert_db, THIS_DIR
+from utils.log import LogFilter
 from rich.logging import RichHandler
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", datefmt="[%X]", handlers=[RichHandler()])
+logging.getLogger("pyrogram.session.session").addFilter(LogFilter())
+logging.getLogger("pyrogram.client").addFilter(LogFilter())
 logger = logging.getLogger("media_downloader_current")
 
-with open("config.yaml", encoding='utf-8') as f:
+with open(THIS_DIR + "/config.yaml", encoding='utf-8') as f:
     config = yaml.safe_load(f)
 handle_chat_id = config.get("chat_id")
 push_users = config.get("push_users")
@@ -61,8 +64,8 @@ def add_live_info(text):
     if live_status is None or url is None:
         return
     data = {
-        "down_live_chat": True,
-        "get_live_info": True,
+        "downLiveChat": True,
+        "getLiveInfo": True,
         "url": url,
         "liveStatus": live_status
     }

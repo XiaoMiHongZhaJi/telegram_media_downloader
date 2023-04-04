@@ -22,15 +22,18 @@ logger = logging.getLogger("media_downloader")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 last_message_id = 0
-with open("config.yaml", encoding='utf-8') as f:
-    config = yaml.safe_load(f)
+with open(THIS_DIR + "/config.yaml", encoding='utf-8') as file:
+    config = yaml.safe_load(file)
 media_types = config.get("media_types")
 max_file_size_mb = config.get("max_file_size_mb")
 file_formats = config.get("file_formats")
 datasource = config.get("datasource")
 if datasource is not None:
     try:
-        db = pymysql.connect(user=datasource["user"], password=datasource["password"], host=datasource["host"],
+        password = datasource.get("password")
+        if password is not None and str.isdigit(password):
+            password = str(password)
+        db = pymysql.connect(user=datasource["user"], password=password, host=datasource["host"],
                              database=datasource["database"], connect_timeout=2)
         logger.info("数据库连接成功")
     except Exception:
@@ -39,8 +42,8 @@ if datasource is not None:
 
 
 def update_config():
-    with open("config.yaml", "w", encoding='utf-8') as yaml_file:
-        yaml.dump(config, yaml_file, default_flow_style=False, allow_unicode=True)
+    with open(THIS_DIR + "/config.yaml", "w", encoding='utf-8') as yaml_file:
+        yaml.dump(config, yaml_file, allow_unicode=True)
     logger.info("Updated last read message_id to config file")
 
 
@@ -110,7 +113,7 @@ async def write_file(caption, message, message_id, reply_to, send_time, show_nam
         content = "[已删除]" + content
         logger.warning(content)
     # title = re.sub(r"[\\\"\sㅤ/:?!*.<>|]", "_", chat_title)
-    message_dir = "./message/"
+    message_dir = THIS_DIR + "/message/"
     filename = message_dir + send_time.split(" ")[0] + ".txt"
     if not os.path.exists(message_dir):
         os.makedirs(message_dir)
@@ -151,6 +154,8 @@ def update_status(message_id, status):
 
 async def insert_db(caption, chat_id, chat_title, first_name, forward_from, last_name, message_id, phone_number,
                     reply_to, send_time, edit_date, sticker, text, user_id, username, status):
+    if datasource is None:
+        return
     sql = "INSERT INTO group_message(chat_id,message_id,user_id,chat_title,first_name,last_name,username,phone_number,text,forward_from,reply_to,caption,sticker,send_time,edit_date,status) VALUES ("
     sql += str(chat_id) + ","
     sql += str(message_id) + ","
@@ -279,9 +284,6 @@ async def download_message(app: pyrogram.client.Client,message: pyrogram.types.M
 
 
 async def process_messages(client: pyrogram.client.Client, messages: List[pyrogram.types.Message]) -> int:
-    path = r'./message'
-    if not os.path.exists(path):
-        os.mkdir("./message")
     message_ids = await asyncio.gather(*[download_message(client, message) for message in messages])
     last_read_message_id: int = max(message_ids)
     return last_read_message_id
