@@ -17,10 +17,12 @@ THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 with open(THIS_DIR + "/config.yaml", encoding='utf-8') as file:
     config = yaml.safe_load(file)
 notice_url = config.get("notice_url")
+notice_url2 = config.get("notice_url2")
 chat_id = config["chat_id"]
 last_like_message_id = config.get("last_like_message_id")
-if last_like_message_id is None:
+if last_like_message_id is None or last_like_message_id <= 1351951:
     last_like_message_id = 1351951
+last_like_message_id = last_like_message_id - 500
 datasource = config.get("datasource")
 if datasource is not None:
     try:
@@ -35,7 +37,7 @@ if datasource is not None:
         logger.error("数据库连接失败")
 
 
-def get_like_messages(client, offset_id, limit, last_like_message_id):
+def get_like_messages(client, offset_id, limit):
     message_info = client.invoke(
         raw.functions.messages.GetHistory(
             peer=client.resolve_peer(chat_id),
@@ -79,12 +81,6 @@ def get_like_messages(client, offset_id, limit, last_like_message_id):
                 content = emoticon + "➡" + text
                 logger.info(content)
                 str_message_id = str(message_id)
-                data = {
-                    'title': "wild精选",
-                    'body': content,
-                    'sound': 'shake',
-                    'url': "https://t.me/c/1744444199/" + str_message_id
-                }
                 ten_time_array = time.localtime(message.date)
                 send_time = time.strftime("%Y-%m-%d %H:%M:%S", ten_time_array)
                 if datasource is not None:
@@ -98,7 +94,9 @@ def get_like_messages(client, offset_id, limit, last_like_message_id):
                     if result is None:
                         write_to_file("wild精选：" + content, send_time)
                         if notice_url is not None and notice_url.find("xxxx") == -1:
-                            requests.post(notice_url, data)
+                            requests.post(notice_url + content + "/" + "https://t.me/c/1744444199/" + str_message_id)
+                        if notice_url2 is not None:
+                            requests.post(notice_url2 + content + "/" + "https://t.me/c/1744444199/" + str_message_id)
                         sql = "insert into wild_like_message(message_id, link, user_id, text, sticker, send_time, create_time) values ("
                         sql += str_message_id
                         sql += ", 'https://t.me/c/1744444199/" + str_message_id + "', "
@@ -110,11 +108,13 @@ def get_like_messages(client, offset_id, limit, last_like_message_id):
                         cursor.execute(sql)
                         db.commit()
                     else:
-                        logger.info(str_message_id + "已推送过，跳过")
+                        logger.info("----------------------" + str_message_id + "已推送过，跳过")
                 else:
                     write_to_file("wild精选：" + content, send_time)
                     if notice_url is not None and notice_url.find("xxxx") == -1:
-                        requests.post(notice_url, data)
+                        requests.post(notice_url + content + "/" + "https://t.me/c/1744444199/" + str_message_id)
+                        if notice_url2 is not None:
+                            requests.post(notice_url2 + content + "/" + "https://t.me/c/1744444199/" + str_message_id)
     return last_message_id, like_message_id
 
 
@@ -139,11 +139,11 @@ def main():
     client.start()
     limit = 100
     new_like_message_id = None
-    last_message_id, like_message_id = get_like_messages(client, 0, limit, last_like_message_id)
+    last_message_id, like_message_id = get_like_messages(client, 0, limit)
     if like_message_id is not None:
         new_like_message_id = like_message_id
     while last_message_id > last_like_message_id:
-        last_message_id, like_message_id = get_like_messages(client, last_message_id, limit, last_like_message_id)
+        last_message_id, like_message_id = get_like_messages(client, last_message_id, limit)
         if like_message_id is not None and (new_like_message_id is None or new_like_message_id < like_message_id):
             new_like_message_id = like_message_id
     if new_like_message_id is not None:

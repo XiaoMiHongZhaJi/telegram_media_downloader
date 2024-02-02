@@ -36,7 +36,8 @@ if datasource is not None:
         db = pymysql.connect(user=datasource["user"], password=password, host=datasource["host"],
                              database=datasource["database"], connect_timeout=2)
         logger.info("数据库连接成功")
-    except Exception:
+    except Exception as e:
+        logger.error(e)
         datasource = None
         logger.error("数据库连接失败")
 

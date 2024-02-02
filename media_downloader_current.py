@@ -20,6 +20,7 @@ handle_chat_id = config.get("chat_id")
 push_users = config.get("push_users")
 push_keywords = config.get("push_keywords")
 notice_url = config.get("notice_url")
+notice_url2 = config.get("notice_url2")
 add_live_info_url = config.get("add_live_info_url")
 app = Client("media_downloader_current", api_id=config["api_id"], api_hash=config["api_hash"], proxy=config.get("proxy"))
 
@@ -29,26 +30,24 @@ def keywords_notice(chat_title, show_name, message_text):
         return
     if push_users is not None:
         if show_name in push_users:
-            data = {
-                'title': chat_title,
-                'body': show_name + "：" + message_text,
-                'sound': 'shake'
-            }
-            requests.post(notice_url, data)
+            if len(message_text) > 50:
+                message_text = message_text[:50] + "..."
+            requests.post(notice_url + chat_title + "/" + show_name + "：" + message_text)
+            if notice_url2 is not None:
+                requests.post(notice_url2 + chat_title + "/" + show_name + "：" + message_text)
             return
     if push_keywords is not None:
         for push_keyword in push_keywords:
             if message_text.find(push_keyword) > -1:
-                data = {
-                    'title': chat_title,
-                    'body': show_name + "：" + message_text,
-                    'sound': 'shake'
-                }
-                requests.post(notice_url, data)
+                if len(message_text) > 50:
+                    message_text = message_text[:50] + "..."
+                requests.post(notice_url + chat_title + "/" + show_name + "：" + message_text)
+                if notice_url2 is not None:
+                    requests.post(notice_url2 + chat_title + "/" + show_name + "：" + message_text)
                 break
 
 
-def add_live_info(text):
+async def add_live_info(text):
     # #YouTube #直播预告 https://www.youtube.com/watch?v=eIUxtCBCVUw
     if add_live_info_url is None:
         return
@@ -61,7 +60,7 @@ def add_live_info(text):
             live_status = '1'
         elif split.find("https") > -1:
             url = split
-    if live_status is None or url is None:
+    if live_status is None or live_status == '1' or url is None:
         return
     data = {
         "downLiveChat": True,
@@ -69,7 +68,7 @@ def add_live_info(text):
         "url": url,
         "liveStatus": live_status
     }
-    res = requests.post(add_live_info_url, data)
+    res = requests.post(add_live_info_url, data, auth=('user', 'password'))
     logging.info(res.text)
 
 
